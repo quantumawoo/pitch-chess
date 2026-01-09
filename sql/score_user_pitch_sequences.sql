@@ -1,8 +1,3 @@
--- Per-pitch scoring + best alternative pitch suggestion (theory-only)
--- Table: `your_project.your_dataset.user_pitch_events`
--- Pitch types supported: FF, SL, CH, CU, CT, SI, FB
--- Zones supported: 1–14 (Statcast-style grid; 1–9 in-zone, 10–14 out-of-zone)
-
 WITH ordered_pitches AS (
   SELECT
     sequence_id,
@@ -28,19 +23,16 @@ WITH ordered_pitches AS (
   )
 ),
 
--- Score the ACTUAL pitch (split theory vs outcome so alternatives can ignore outcome)
 scored_actual AS (
   SELECT
     *,
 
-    -- 1) No exact repetition (type+zone)
     CASE
       WHEN pitch_type = prev_pitch_type AND zone = prev_zone THEN -2
       WHEN pitch_type != prev_pitch_type AND zone = prev_zone THEN  1
       ELSE 0
     END AS repetition_score,
 
-    -- 2) Count-based intent (MVP)
     CASE
       WHEN count = '0-0' AND zone NOT BETWEEN 1 AND 9 THEN -1
       WHEN count IN ('0-2','1-2') AND zone NOT BETWEEN 1 AND 9 THEN  1
@@ -48,13 +40,11 @@ scored_actual AS (
       ELSE 0
     END AS count_score,
 
-    -- 3) Shape change (change pitch type = +1)
     CASE
       WHEN prev_pitch_type IS NOT NULL AND pitch_type != prev_pitch_type THEN 1
       ELSE 0
     END AS shape_score,
 
-    -- 4) Eye-level change (high↔low)
     CASE
       WHEN prev_zone IS NOT NULL
        AND (
@@ -64,7 +54,6 @@ scored_actual AS (
       ELSE 0
     END AS eye_level_score,
 
-    -- Outcome modifier (kept separate; alternatives ignore this)
     CASE
       WHEN outcome IN ('swinging_strike','swinging_strike_blocked') THEN  2
       WHEN outcome = 'called_strike' THEN 1
@@ -87,7 +76,6 @@ actual_with_totals AS (
   FROM scored_actual
 ),
 
--- Candidate alternatives per pitch: 7 pitch types × 14 zones = 98 candidates
 candidates AS (
   SELECT
     a.sequence_id,
@@ -104,22 +92,19 @@ candidates AS (
     cand_pitch_type,
     cand_zone,
 
-    -- Differences (for UI messaging)
     IF(cand_pitch_type != a.pitch_type, 1, 0) AS alt_diff_type,
     IF(cand_zone       != a.zone,       1, 0) AS alt_diff_zone
 
   FROM actual_with_totals a
   CROSS JOIN UNNEST(['FF','SL','CH','CU','CT','SI','FB']) AS cand_pitch_type
   CROSS JOIN UNNEST(GENERATE_ARRAY(1,14)) AS cand_zone
-  WHERE NOT (cand_pitch_type = a.pitch_type AND cand_zone = a.zone) -- exclude identical
+  WHERE NOT (cand_pitch_type = a.pitch_type AND cand_zone = a.zone)
 ),
 
--- Score each candidate alternative using the SAME theory rules, but with cand_* instead of actual
 scored_candidates AS (
   SELECT
     c.*,
 
-    -- 1) Repetition rule relative to previous pitch
     CASE
       WHEN c.prev_pitch_type IS NOT NULL AND c.prev_zone IS NOT NULL
        AND c.cand_pitch_type = c.prev_pitch_type
@@ -132,7 +117,6 @@ scored_candidates AS (
       ELSE 0
     END AS cand_repetition_score,
 
-    -- 2) Count-based intent (same mapping)
     CASE
       WHEN c.count = '0-0' AND c.cand_zone NOT BETWEEN 1 AND 9 THEN -1
       WHEN c.count IN ('0-2','1-2') AND c.cand_zone NOT BETWEEN 1 AND 9 THEN  1
@@ -140,13 +124,11 @@ scored_candidates AS (
       ELSE 0
     END AS cand_count_score,
 
-    -- 3) Shape change relative to previous pitch
     CASE
       WHEN c.prev_pitch_type IS NOT NULL AND c.cand_pitch_type != c.prev_pitch_type THEN 1
       ELSE 0
     END AS cand_shape_score,
 
-    -- 4) Eye-level change relative to previous zone
     CASE
       WHEN c.prev_zone IS NOT NULL
        AND (
@@ -168,7 +150,6 @@ ranked_best_alternative AS (
       PARTITION BY sequence_id, pitch_id
       ORDER BY
         (cand_repetition_score + cand_count_score + cand_shape_score + cand_eye_level_score) DESC,
-        -- tie-breakers: prefer changing BOTH type and zone, then either
         (alt_diff_type + alt_diff_zone) DESC,
         alt_diff_type DESC,
         alt_diff_zone DESC,
@@ -176,6 +157,46 @@ ranked_best_alternative AS (
         cand_zone
     ) AS rn
   FROM scored_candidates
+),
+
+best_alt AS (
+  SELECT
+    *,
+    CASE
+      WHEN alt_diff_type = 1 AND alt_diff_zone = 1 THEN 'Change pitch type and location'
+      WHEN alt_diff_type = 1 AND alt_diff_zone = 0 THEN 'Change pitch type'
+      WHEN alt_diff_type = 0 AND alt_diff_zone = 1 THEN 'Change location'
+      ELSE 'Adjust pitch selection'
+    END AS best_alt_change_recommendation,
+
+    -- Primary reason: pick the strongest single “principle” the alternative achieves
+    CASE
+      WHEN cand_repetition_score = 1 THEN 'Avoid predictability: same location works better with a different pitch type'
+      WHEN cand_repetition_score = -2 THEN 'Avoid predictability: do not repeat exact pitch type and location'
+      WHEN cand_count_score = 1 THEN 'Count leverage: expand the zone to chase'
+      WHEN cand_count_score = -1 THEN 'Early count: establish a competitive strike'
+      WHEN cand_count_score = -2 THEN 'Hitter’s count: avoid the danger middle'
+      WHEN cand_eye_level_score = 1 THEN 'Disrupt the hitter’s eye level (high–low change)'
+      WHEN cand_shape_score = 1 THEN 'Disrupt timing with a different pitch shape'
+      ELSE 'Higher-theory option based on sequencing principles'
+    END AS best_alt_reason_primary,
+
+    -- Details: show which components improved (compact, UI-friendly)
+    ARRAY_TO_STRING(
+      ARRAY(
+        SELECT reason FROM UNNEST([
+          IF(cand_repetition_score = 1, 'Improves repetition rule', NULL),
+          IF(cand_count_score != 0, 'Better count intent', NULL),
+          IF(cand_shape_score = 1, 'Better pitch-shape change', NULL),
+          IF(cand_eye_level_score = 1, 'Better eye-level change', NULL)
+        ]) AS reason
+        WHERE reason IS NOT NULL
+      ),
+      '; '
+    ) AS best_alt_reason_details
+
+  FROM ranked_best_alternative
+  WHERE rn = 1
 )
 
 SELECT
@@ -189,26 +210,19 @@ SELECT
   a.zone,
   a.outcome,
 
-  -- Scores
-  a.repetition_score,
-  a.count_score,
-  a.shape_score,
-  a.eye_level_score,
-  a.outcome_score,
   a.theory_score,
   a.pitch_score,
 
-  -- Best alternative (theory-only)
   b.cand_pitch_type AS best_alt_pitch_type,
   b.cand_zone       AS best_alt_zone,
   b.cand_theory_score AS best_alt_theory_score,
-  b.alt_diff_type,
-  b.alt_diff_zone
+
+  b.best_alt_change_recommendation,
+  b.best_alt_reason_primary,
+  b.best_alt_reason_details
 
 FROM actual_with_totals a
-LEFT JOIN ranked_best_alternative b
+LEFT JOIN best_alt b
   ON a.sequence_id = b.sequence_id
  AND a.pitch_id    = b.pitch_id
- AND b.rn = 1
-
 ORDER BY a.sequence_id, a.pitch_number;
