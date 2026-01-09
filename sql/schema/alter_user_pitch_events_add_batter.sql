@@ -1,5 +1,5 @@
 -- Adds Statcast batter context to user pitch events
 -- Allows Statcast-based modifiers while preserving pure-theory mode
 
-ALTER TABLE `your_project.your_dataset.user_pitch_events`
+ALTER TABLE `catcher-analysis-483801.pitch_chess.user_pitch_events`
 ADD COLUMN batter INT64;
