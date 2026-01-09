@@ -16,7 +16,7 @@ WITH ordered_pitches AS (
     LAG(pitch_type) OVER w AS prev_pitch_type,
     LAG(zone)       OVER w AS prev_zone
 
-  FROM `your_project.your_dataset.user_pitch_events`
+  FROM `catcher-analysis-483801.pitch_chess.user_pitch_events`
   WINDOW w AS (
     PARTITION BY sequence_id
     ORDER BY pitch_number
