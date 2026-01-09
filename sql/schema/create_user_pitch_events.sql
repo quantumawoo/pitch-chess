@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS `your_project.your_dataset.user_pitch_events` (
+CREATE TABLE IF NOT EXISTS `catcher-analysis-483801.pitch_chess.user_pitch_events` (
   -- -----------------------------
   -- Identifiers
   -- -----------------------------
