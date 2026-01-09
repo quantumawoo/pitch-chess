@@ -2,6 +2,7 @@ WITH ordered_pitches AS (
   SELECT
     sequence_id,
     user_id,
+    batter,
     pitch_id,
     pitch_number,
     pitch_type,
@@ -82,6 +83,7 @@ candidates AS (
     a.pitch_id,
     a.pitch_number,
     a.user_id,
+    a.batter,
     a.count,
     a.prev_pitch_type,
     a.prev_zone,
@@ -202,6 +204,7 @@ best_alt AS (
 SELECT
   a.sequence_id,
   a.user_id,
+  a.batter,
   a.pitch_id,
   a.pitch_number,
   a.count,
