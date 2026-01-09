@@ -219,10 +219,11 @@ SELECT
 
   b.best_alt_change_recommendation,
   b.best_alt_reason_primary,
-  b.best_alt_reason_details
+  b.IFNULL(b.best_alt_reason_details, '') AS best_alt_reason_details
 
 FROM actual_with_totals a
 LEFT JOIN best_alt b
   ON a.sequence_id = b.sequence_id
  AND a.pitch_id    = b.pitch_id
+ AND b.cand_theory_score > a.theory_score
 ORDER BY a.sequence_id, a.pitch_number;
